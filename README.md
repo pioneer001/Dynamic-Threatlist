@@ -1,6 +1,6 @@
 # 🛡️ Azure Function Threat List Automation
 
-This project provides a secure, automated way to host IP threat lists via an **Azure Functions** endpoint and deploy them through **GitHub Actions**, including automatic MD5 hash generation, IP access control, and native compatibility with **Cisco Secure Firewall Management Center (FMC)**.  
+This project provides a secure, automated way to host IP threat lists via an **Azure Functions** endpoint and deploy them through **GitHub Actions**, including automatic MD5 hash generation, IP access control, and compatibility with **Cisco Secure Firewall Management Center (FMC)** or other Platforms.  
 
 This setup enables organizations to feed IP threat data directly into firewall policies such as **Security Intelligence (SI)** or block policies.
 
@@ -14,6 +14,7 @@ This setup enables organizations to feed IP threat data directly into firewall p
 - Supports Cisco FMC External Block List integrations.  
 - Automatically manages temporary GitHub runner IP access during deploy.  
 - Ensures threat lists can be used in **SI** or **block policy** enforcement.
+- Designed to be compatible with Free Tier of Github just note limit of 2,000 Actions minutes/month
 
 ---
 
