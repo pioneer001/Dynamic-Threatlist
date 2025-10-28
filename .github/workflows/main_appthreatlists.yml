@@ -1,0 +1,278 @@
+# ============================================================
+# GitHub Action: Build & Deploy Python Azure Functions (appWebtest) CI
+# ============================================================
+
+name: Build and deploy Python project to Azure Function App - appWebtest
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  FUNCTIONAPP_NAME: appWebtest
+  RESOURCE_GROUP: ${{ secrets.AZUREAPPSERVICE_RESOURCEGROUP }} 
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # --- Step 1: Checkout repo ---
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --- Step 2: Setup Python ---
+      - name: Setup Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # --- Step 3: Install dependencies ---
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      # --- Step 4: Generate MD5 HTML files for text and html files ---
+      - name: Generate MD5 HTML hash files
+        run: |
+          echo "Generating and replacing MD5 hash HTML files..."
+          mkdir -p textfiles
+          python3 <<'EOF'
+          import os, hashlib
+
+          text_dir = "textfiles"
+          os.makedirs(text_dir, exist_ok=True)
+
+          for filename in os.listdir(text_dir):
+            if filename.endswith("-md5.html"):
+              continue
+            if not (filename.endswith(".txt") or filename.endswith(".html")):
+              continue
+
+            src = os.path.join(text_dir, filename)
+            if not os.path.isfile(src):
+              continue
+
+            with open(src, "rb") as f:
+              md5_hash = hashlib.md5(f.read()).hexdigest()
+
+            base = os.path.splitext(filename)[0]
+            dst = os.path.join(text_dir, f"{base}-md5.html")
+
+            with open(dst, "w", encoding="utf-8") as out:
+              out.write(f"{md5_hash}")
+
+          print("MD5 files regenerated and replaced.")
+          EOF
+        shell: bash
+
+      # --- Step 5: Zip artifact for deployment ---
+      - name: Zip artifact
+        run: zip -r release.zip . -x "venv/*" ".git/*"
+
+      # --- Step 6: Upload artifact for deploy job ---
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-app
+          path: release.zip
+      
+      # --- Step 7: List generated MD5 files ---
+      - name: List generated MD5 files
+        run: ls -la textfiles
+
+      #  --- Step 8: Commit regenerated MD5 files ---
+      - name: Commit regenerated MD5 files
+        if: always()
+        run: |
+         git config user.name "github-actions[bot]"
+         git config user.email "github-actions[bot]@users.noreply.github.com"
+         git add textfiles/*-md5.html
+         git diff --cached --quiet || git commit -m "Regenerate MD5 hash files after deployment"
+         git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write
+      contents: write
+
+    steps:
+      # --- Step 1: Download build artifact ---
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: python-app
+
+      # --- Step 2: Safe unzip ---
+      - name: Unzip artifact safely
+        run: |
+          echo "Listing downloaded files..."
+          ls -la
+          if [ -f release.zip ]; then
+            echo "Unzipping release.zip"
+            unzip -o release.zip -d .
+            rm -f release.zip
+          else
+            echo "No release.zip found, skipping unzip."
+          fi
+
+      # --- Step 3: Login to Azure (OIDC Managed Identity) ---
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID }}
+
+      # --- Step 4: Enforce IP allowlist from accessWhitelist.txt ---
+      - name: Enforce IP allowlist from accessWhitelist.txt
+        run: |
+          set -e
+
+          FILE="accessWhitelist.txt"
+          echo "📥 Checking $FILE for required IP rules..."
+
+          if [ ! -f "$FILE" ]; then
+            echo "⚠️ $FILE not found — skipping allowlist enforcement."
+            exit 0
+          fi
+
+          # Normalize line endings manually (no dos2unix needed)
+          sed -i 's/\r$//' "$FILE"
+
+          get_free_priority() {
+            local prios
+            prios=$(az functionapp config access-restriction show \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --name ${{ env.FUNCTIONAPP_NAME }} \
+              --query "ipSecurityRestrictions[].priority" -o tsv)
+            for p in $(seq 500 2000); do
+              if ! echo "$prios" | grep -qw "$p"; then
+                echo "$p"
+                return 0
+              fi
+            done
+            echo "❌ ERROR: No free priority number available in range 500–2000."
+            exit 1
+          }
+
+          ip_exists() {
+            local ip_check="$1"
+            az functionapp config access-restriction show \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --name ${{ env.FUNCTIONAPP_NAME }} \
+              --query "ipSecurityRestrictions[?ipAddress=='${ip_check}/32' || ipAddress=='${ip_check}']" \
+              -o tsv | grep -q "${ip_check}"
+          }
+
+          while IFS= read -r line || [ -n "$line" ]; do
+            # Trim spaces and CRLF
+            line=$(echo "$line" | tr -d '\r' | xargs)
+
+            # Skip empty or comment lines
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+
+            echo "📄 Processing line: '$line'"
+
+            ip=$(echo "$line" | awk '{print $1}')
+            desc=$(echo "$line" | cut -d'#' -f2- | xargs)
+            safe_desc=$(echo "$desc" | tr -cd '[:alnum:]-_')
+
+            if ip_exists "$ip"; then
+              echo "✅ IP ${ip} already in allowlist. Skipping."
+              continue
+            fi
+
+            FREE_PRIORITY=$(get_free_priority)
+            echo "🆓 Using priority ${FREE_PRIORITY} for IP ${ip}"
+            echo "➕ Adding IP ${ip} (${desc}) to main site rules..."
+
+            set +e
+            az functionapp config access-restriction add \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --name ${{ env.FUNCTIONAPP_NAME }} \
+              --rule-name "Allow-${safe_desc}" \
+              --action Allow \
+              --ip-address "${ip}" \
+              --priority "${FREE_PRIORITY}" \
+              --description "${desc}"
+            ADD_STATUS=$?
+            set -e
+
+            if [ $ADD_STATUS -ne 0 ]; then
+              echo "⚠️ Failed to add IP ${ip}, continuing to next..."
+              continue
+            fi
+
+            echo "✅ Rule for ${ip} added successfully."
+
+          done < "$FILE"
+
+
+      # --- Step 5: Detect runner public IP ---
+      - name: Detect runner public IP
+        id: detect_ip
+        run: |
+          echo "Detecting runner public IP..."
+          IP=$(curl -s https://api.ipify.org)
+          echo "Detected IP: $IP"
+          echo "ip=$IP" >> $GITHUB_OUTPUT
+
+      # --- Step 6: Temporarily Allow GitHub Runner IP ---
+      - name: Add temporary IP allow rule
+        run: |
+          echo "Adding IP restriction for ${{ steps.detect_ip.outputs.ip }}"
+          az functionapp config access-restriction add \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.FUNCTIONAPP_NAME }} \
+            --rule-name "GitHubActionTemp" \
+            --scm-site true \
+            --action Allow \
+            --ip-address "${{ steps.detect_ip.outputs.ip }}" \
+            --priority 100
+
+      # --- Step 7: Deploy to Azure Function ---
+      - name: Deploy to Azure Function
+        uses: Azure/functions-action@v1
+        id: deploy-to-function
+        with:
+          app-name: ${{ env.FUNCTIONAPP_NAME }}
+          slot-name: 'Production'
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+
+      # --- Step 8: Re-login for cleanup reliability ---
+      - name: Re-login to Azure for cleanup
+        if: always()
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID }}
+
+      # --- Step 9: Remove temporary IP restriction ---
+      - name: Remove temporary IP allow rule
+        if: always()
+        run: |
+          echo "Removing temporary IP restriction for GitHubActionTemp"
+          az functionapp config access-restriction remove \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.FUNCTIONAPP_NAME }} \
+            --action Allow \
+            --scm-site true \
+            --rule-name "GitHubActionTemp"
