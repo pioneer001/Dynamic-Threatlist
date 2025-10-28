@@ -88,8 +88,8 @@ GET https://<your-function>.azurewebsites.net/api/getThreatList?filename=<file>
 
 Examples:
 ```
-https://appwebtest.azurewebsites.net/api/getThreatList?filename=threats.txt
-https://appwebtest.azurewebsites.net/api/getThreatList?filename=threats-md5.html
+https://<your-function>.azurewebsites.net/api/getThreatList?filename=threats.txt
+https://<your-function>.azurewebsites.net/api/getThreatList?filename=threats-md5.html
 ```
 
 ---
@@ -103,11 +103,11 @@ https://appwebtest.azurewebsites.net/api/getThreatList?filename=threats-md5.html
    - **Type:** IP  
    - **URL:**
      ```
-     https://<app>.azurewebsites.net/api/getThreatList?filename=threats.html
+     https://<your-function>.azurewebsites.net/api/getThreatList?filename=threats.html
      ```
    - **Verify MD5 URL:**
      ```
-     https://<app>.azurewebsites.net/api/getThreatList?filename=threats-md5.html
+     https://<your-function>.azurewebsites.net/api/getThreatList?filename=threats-md5.html
      ```
    - **Refresh Interval:** e.g., 30 min
 3. Add the object to your **SI (Security Intelligence)** or **Block Policy**.
